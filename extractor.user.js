@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         TVP Video Info Extractor
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      3.0
 // @description  Extracts metadata, manifest URL, and subtitles URL from TVP VOD pages and downloads them as JSON
 // @author       You
+// @match        https://*.tvp.pl/*
+// @match        https://tvp.pl/*
 // @match        https://vod.tvp.pl/*
 // @run-at       document-start
 // @grant        unsafeWindow
@@ -12,9 +14,6 @@
 (function () {
     'use strict';
 
-    // -------------------------------------------------------------------------
-    // Logger
-    // -------------------------------------------------------------------------
     const log = (msg) => console.log(`[TVP Extractor] ${msg}`);
 
     // -------------------------------------------------------------------------
@@ -29,12 +28,15 @@
         subtitles_url: null,
     };
 
+    let downloadTriggered = false;
+
     const resetAll = () => {
         Object.keys(data).forEach((k) => { data[k] = null; });
+        downloadTriggered = false;
     };
 
     // -------------------------------------------------------------------------
-    // Link list configuration
+    // Episode link list
     // -------------------------------------------------------------------------
     const EPISODE_LINKS = [
         'https://vod.tvp.pl/seriale,18/ranczo-odcinki,316445/odcinek-1,S01E01,381046',
@@ -169,52 +171,37 @@
         'https://vod.tvp.pl/seriale,18/ranczo-odcinki,316445/odcinek-130,S10E130,387698'
     ];
 
-    // -------------------------------------------------------------------------
-    // Link management functions
-    // -------------------------------------------------------------------------
-    const isCurrentUrlInLinkList = () => {
-        const currentUrl = location.href;
-        return EPISODE_LINKS.includes(currentUrl);
-    };
-
     const getNextEpisodeUrl = () => {
-        const currentUrl = location.href;
-        const currentIndex = EPISODE_LINKS.indexOf(currentUrl);
-
-        if (currentIndex !== -1 && currentIndex < EPISODE_LINKS.length - 1) {
-            return EPISODE_LINKS[currentIndex + 1];
-        }
-
-        return null; // No next episode found
+        const idx = EPISODE_LINKS.indexOf(location.href);
+        return (idx !== -1 && idx < EPISODE_LINKS.length - 1) ? EPISODE_LINKS[idx + 1] : null;
     };
 
     const redirectToNextEpisode = () => {
         const nextUrl = getNextEpisodeUrl();
         if (nextUrl) {
             log(`Redirecting to next episode: ${nextUrl}`);
-            setTimeout(() => {
-                location.href = nextUrl;
-            }, 2000); // Wait 2 seconds before redirecting
+            setTimeout(() => { location.href = nextUrl; }, 2000);
         } else {
-            log('No next episode found in the list. This was the last episode.');
+            log('No next episode found – this was the last one.');
         }
     };
 
     // -------------------------------------------------------------------------
     // URL pattern matching
     // -------------------------------------------------------------------------
-    // Observed real URL: https://sdt-epix7-38.tvp.pl/token/video/vod/.../video.ism/nv-dash-init-vod4-....mp4
-    // Host prefix is "sdt-" (not "rsdt-" as originally assumed). Broadened to match
-    // any *.tvp.pl CDN host so future host changes don't break capture again.
     const MANIFEST_SEGMENT_RE = /^(https:\/\/[^/]*\.tvp\.pl\/token\/video\/vod\/[^/]+\/[^/]+\/[^/]+\/[^/]+\/video\.ism\/)nv-dash-[^/]+-vod[^/]*\.(mp4|m4s)$/;
-
-    // Observed real URL: https://s.tvp.pl/repository/attachment/f/8/b/<hash>.xml
-    // The hash is split into single-char subdirectories before the full filename,
-    // e.g. .../attachment/f/8/b/f8bc272dc1c9a673....xml
     const SUBTITLES_RE        = /^https:\/\/s\.tvp\.pl\/repository\/attachment\/(?:[0-9a-f]\/)*[0-9a-f][^/]*\.xml$/;
 
+    const onBothCaptured = () => {
+        if (downloadTriggered) return;
+        if (!data.manifest_url || !data.subtitles_url) return;
+        downloadTriggered = true;
+        log('Both URLs captured – triggering download and redirect.');
+        downloadJSON();
+    };
+
     const testAndStoreUrl = (url) => {
-        if (typeof url !== 'string') return;
+        if (typeof url !== 'string' || downloadTriggered) return;
 
         if (!data.manifest_url) {
             const m = url.match(MANIFEST_SEGMENT_RE);
@@ -222,8 +209,6 @@
                 data.manifest_url = m[1] + 'Manifest';
                 log(`Captured manifest URL: ${data.manifest_url}`);
             } else if (url.includes('video.ism')) {
-                // URL contains video.ism but didn't match – log so the regex can
-                // be adjusted if the segment filename format has changed.
                 log(`[NEAR-MISS manifest] ${url}`);
             }
         }
@@ -232,14 +217,19 @@
             if (SUBTITLES_RE.test(url)) {
                 data.subtitles_url = url;
                 log(`Captured subtitles URL: ${data.subtitles_url}`);
-            } else if (url.includes('s.tvp.pl/repository/attachment') && (url.endsWith('.xml') || url.endsWith('.vtt') || url.endsWith('.srt'))) {
+            } else if (
+                url.includes('s.tvp.pl/repository/attachment') &&
+                (url.endsWith('.xml') || url.endsWith('.vtt') || url.endsWith('.srt'))
+            ) {
                 log(`[NEAR-MISS subtitles] ${url}`);
             }
         }
+
+        onBothCaptured();
     };
 
     // -------------------------------------------------------------------------
-    // Step 2a – PerformanceObserver (main thread + any same-origin resources)
+    // PerformanceObserver
     // -------------------------------------------------------------------------
     const installPerformanceObserver = () => {
         try {
@@ -258,25 +248,17 @@
     };
 
     // -------------------------------------------------------------------------
-    // Step 2b – Main-thread fetch / XHR patch
-    //
-    // Patches unsafeWindow.fetch and XMLHttpRequest.prototype.open so that every
-    // network request made from the page's own JS (including the DASH player and
-    // subtitle loader running on the main thread) is passed through testAndStoreUrl.
-    // This is the primary capture mechanism when Worker patching is unavailable.
+    // Main-thread fetch / XHR patch
     // -------------------------------------------------------------------------
     const patchMainThreadRequests = () => {
         try {
-            // --- fetch ---
             const origFetch = unsafeWindow.fetch;
             unsafeWindow.fetch = function (input, init) {
                 try {
-                    const url = (input && typeof input === 'object') ? input.url : String(input);
-                    testAndStoreUrl(url);
-                } catch (_) { /* never break the player */ }
+                    testAndStoreUrl((input && typeof input === 'object') ? input.url : String(input));
+                } catch (_) {}
                 return origFetch.apply(unsafeWindow, arguments);
             };
-            // Verify the assignment actually took effect.
             if (unsafeWindow.fetch !== origFetch) {
                 log('Main-thread fetch patched.');
             } else {
@@ -287,10 +269,9 @@
         }
 
         try {
-            // --- XHR ---
             const origOpen = unsafeWindow.XMLHttpRequest.prototype.open;
             unsafeWindow.XMLHttpRequest.prototype.open = function (method, url) {
-                try { testAndStoreUrl(String(url)); } catch (_) { /* never break */ }
+                try { testAndStoreUrl(String(url)); } catch (_) {}
                 return origOpen.apply(this, arguments);
             };
             log('Main-thread XHR patched.');
@@ -300,25 +281,11 @@
     };
 
     // -------------------------------------------------------------------------
-    // Step 2c – Worker constructor patch
-    //
-    // The DASH player spawns a Web Worker for segment fetching. Workers have
-    // their own isolated performance timeline and global scope, so the
-    // PerformanceObserver above cannot see their requests.
-    //
-    // Fix: override the Worker constructor to synchronously fetch the worker
-    // script, prepend a small shim that patches fetch and XHR inside the worker
-    // and relays every URL back to the main thread via postMessage, then hand
-    // the modified script to the real Worker as a blob URL.
-    //
-    // The shim uses a namespaced message key (__tvpExtractorUrl) so it never
-    // collides with the player's own postMessage traffic.
+    // Worker constructor patch
     // -------------------------------------------------------------------------
     const WORKER_SHIM = `
 (function () {
     var _tag = '__tvpExtractorUrl';
-
-    // Patch fetch inside the worker
     if (typeof self.fetch === 'function') {
         var _origFetch = self.fetch.bind(self);
         self.fetch = function (input, init) {
@@ -327,8 +294,6 @@
             return _origFetch(input, init);
         };
     }
-
-    // Patch XHR inside the worker
     if (typeof XMLHttpRequest !== 'undefined') {
         var _origOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function (method, url) {
@@ -344,23 +309,16 @@
             const OriginalWorker = unsafeWindow.Worker;
 
             unsafeWindow.Worker = function (scriptURL, options) {
-                let worker;
-
                 try {
-                    // Fetch the worker source synchronously (same-origin or blob URL).
                     const xhr = new XMLHttpRequest();
                     xhr.open('GET', scriptURL, false);
                     xhr.send();
 
                     if (xhr.status === 200 || xhr.status === 0) {
-                        const patched  = new Blob(
-                            [WORKER_SHIM, xhr.responseText],
-                            { type: 'application/javascript' }
-                        );
-                        const blobUrl  = URL.createObjectURL(patched);
-                        worker         = new OriginalWorker(blobUrl, options);
+                        const blob    = new Blob([WORKER_SHIM, xhr.responseText], { type: 'application/javascript' });
+                        const blobUrl = URL.createObjectURL(blob);
+                        const worker  = new OriginalWorker(blobUrl, options);
 
-                        // Relay URL reports from the worker to the main store.
                         worker.addEventListener('message', (e) => {
                             if (e.data && e.data._tag === '__tvpExtractorUrl') {
                                 testAndStoreUrl(e.data.url);
@@ -374,13 +332,11 @@
                     log(`Worker patch inner error: ${inner.message} – falling back.`);
                 }
 
-                // Fallback: create unmodified worker.
                 return new OriginalWorker(scriptURL, options);
             };
 
             unsafeWindow.Worker.prototype = OriginalWorker.prototype;
 
-            // Verify the assignment actually took effect.
             if (unsafeWindow.Worker !== OriginalWorker) {
                 log('Worker constructor patched.');
             } else {
@@ -392,7 +348,7 @@
     };
 
     // -------------------------------------------------------------------------
-    // Step 1 – DOM metadata extraction
+    // DOM metadata extraction
     // -------------------------------------------------------------------------
     const TITLE_SELECTORS = [
         'p.ui-player-gui-title__headline',
@@ -405,11 +361,9 @@
 
     const extractTitle = () => {
         for (const sel of TITLE_SELECTORS) {
-            const el = document.querySelector(sel);
-            if (el) {
-                const text = el.textContent.trim();
-                if (text) return text;
-            }
+            const el   = document.querySelector(sel);
+            const text = el?.textContent.trim();
+            if (text) return text;
         }
         return null;
     };
@@ -427,28 +381,20 @@
         if (!raw) return { episode_code: null, episode_title: null };
         const text     = raw.replace(/\s+/g, ' ').trim();
         const numMatch = text.match(/Sezon\s+(\d+)[^]*?odc\.\s*(\d+)/i);
-        let episode_code = null;
-        if (numMatch) {
-            const s    = String(numMatch[1]).padStart(2, '0');
-            const e    = String(numMatch[2]).padStart(2, '0');
-            episode_code = `S${s}E${e}`;
-        }
-        const titleMatch  = text.match(/[–\-]\s*(.+)$/);
+        const episode_code = numMatch
+            ? `S${String(numMatch[1]).padStart(2, '0')}E${String(numMatch[2]).padStart(2, '0')}`
+            : null;
+        const titleMatch   = text.match(/[–\-]\s*(.+)$/);
         const episode_title = titleMatch ? titleMatch[1].trim() : text;
         return { episode_code, episode_title };
     };
 
-    // Fallback: parse <script type="application/ld+json"> VideoObject block.
-    // Present in the raw HTML before Vue renders, so reliably available even
-    // when DOM polling races or the SPA has not finished mounting.
-    // Example field: "name": "Ranczo odc. 1 – Spadek"
     const extractFromJsonLd = () => {
         try {
             for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
                 const json = JSON.parse(el.textContent);
                 if (json['@type'] !== 'VideoObject') continue;
 
-                // "name" is "<Series> odc. <N> – <EpisodeTitle>"
                 const fullName = (json.name || '').trim();
                 if (fullName && !data.title) {
                     const splitIdx = fullName.toLowerCase().indexOf(' odc.');
@@ -456,18 +402,15 @@
                         data.title = fullName.slice(0, splitIdx).trim();
                         const episodePart = fullName.slice(splitIdx + 1).trim();
 
-                        // Derive season number from mainEntityOfPage URL: .../S01E01,...
-                        let seasonNum = null;
-                        const pageId = (json.mainEntityOfPage || {})['@id'] || '';
+                        const pageId      = (json.mainEntityOfPage || {})['@id'] || '';
                         const seasonMatch = pageId.match(/S(\d+)E\d+/i);
-                        if (seasonMatch) seasonNum = parseInt(seasonMatch[1], 10);
+                        const seasonNum   = seasonMatch ? parseInt(seasonMatch[1], 10) : null;
+                        const epNumMatch  = episodePart.match(/odc\.\s*(\d+)/i);
 
-                        const epNumMatch = episodePart.match(/odc\.\s*(\d+)/i);
                         if (epNumMatch && seasonNum !== null) {
-                            const s = String(seasonNum).padStart(2, '0');
-                            const e = String(epNumMatch[1]).padStart(2, '0');
-                            data.episode_code = `S${s}E${e}`;
+                            data.episode_code = `S${String(seasonNum).padStart(2, '0')}E${String(epNumMatch[1]).padStart(2, '0')}`;
                         }
+
                         const titleMatch = episodePart.match(/[–\-]\s*(.+)$/);
                         if (titleMatch) data.episode_title = titleMatch[1].trim();
                     } else {
@@ -494,25 +437,25 @@
         const title      = extractTitle();
         const episodeRaw = extractEpisodeRaw();
         const descEl     = document.querySelector('p.ui-metadata-description__text');
+
         if (title)  data.title       = title;
         if (descEl) data.description = descEl.textContent.trim();
+
         if (episodeRaw) {
             const { episode_code, episode_title } = parseEpisodeMeta(episodeRaw);
             data.episode_title = episode_title;
             data.episode_code  = episode_code;
             log(`Parsed episode – title: "${episode_title}", code: "${episode_code}"`);
         }
+
         log(`Metadata extracted – title: "${data.title}", description present: ${!!data.description}`);
 
-        // Fill any remaining gaps from JSON-LD.
         if (!data.title || !data.episode_code || !data.description) {
             extractFromJsonLd();
         }
     };
 
     const waitForMetadata = () => {
-        // Try JSON-LD immediately – it is present in the raw HTML before Vue
-        // renders and is therefore available at document-start.
         if (extractFromJsonLd()) {
             log('Metadata pre-resolved from JSON-LD.');
         }
@@ -520,6 +463,7 @@
         const INTERVAL_MS  = 500;
         const MAX_ATTEMPTS = 40;
         let attempts = 0;
+
         const interval = setInterval(() => {
             attempts++;
             if (extractTitle() || extractEpisodeRaw() || document.querySelector('p.ui-metadata-description__text')) {
@@ -534,10 +478,9 @@
         }, INTERVAL_MS);
     };
 
-    // Auto-play helpers
     // -------------------------------------------------------------------------
-
-    // Ordered list of CSS selectors tried for the initial play button.
+    // Play button helpers
+    // -------------------------------------------------------------------------
     const PLAY_SELECTORS = [
         '.button--watch',
         'button[aria-label*="Odtwórz"]',
@@ -557,14 +500,11 @@
         '.btn-play',
     ];
 
-    // Find a play button that is currently visible (offsetParent !== null).
-    // Returns the element or null.
     const findVisiblePlayButton = () => {
         for (const selector of PLAY_SELECTORS) {
             const btn = document.querySelector(selector);
             if (btn && btn.offsetParent !== null) return btn;
         }
-        // Text-content fallback.
         for (const btn of document.querySelectorAll('button')) {
             if (btn.offsetParent === null) continue;
             const text  = btn.textContent.toLowerCase();
@@ -579,9 +519,6 @@
         return null;
     };
 
-    // Wait up to maxWaitMs for a visible play button to appear, then click it.
-    // Uses both MutationObserver (reacts immediately to DOM changes) and a
-    // 250 ms interval (catches CSS visibility changes that don't alter DOM).
     const waitForPlayButton = (maxWaitMs = 15000) => {
         log('Waiting for play button to become visible...');
         return new Promise((resolve) => {
@@ -618,13 +555,10 @@
                 attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'],
             });
 
-            // Try immediately in case it is already visible.
             tryClick();
         });
     };
 
-    // Click a play button right now, ignoring visibility.
-    // Used after subtitle selection when the player is already running.
     const clickPlayButton = () => {
         for (const selector of PLAY_SELECTORS) {
             const btn = document.querySelector(selector);
@@ -647,9 +581,11 @@
             const settle = (src) => {
                 if (settled) return;
                 settled = true;
-                cleanup();
+                observer.disconnect();
+                clearTimeout(timeoutId);
                 resolve(src);
             };
+
             const check = () => {
                 for (const video of document.querySelectorAll('video')) {
                     if (typeof video.src === 'string' && video.src.startsWith('blob:https://vod.tvp.pl/')) {
@@ -660,22 +596,18 @@
                 }
                 return false;
             };
+
             const observer  = new MutationObserver(() => { check(); });
             const timeoutId = setTimeout(() => {
                 log('Max wait time reached without blob video, proceeding anyway.');
                 settle(null);
             }, maxWaitMs);
-            const cleanup = () => {
-                observer.disconnect();
-                clearTimeout(timeoutId);
-            };
+
             observer.observe(document.body, { childList: true, subtree: true });
             check();
         });
     };
 
-    // After ads the player pauses on the main content and shows a dedicated
-    // in-player play button. Watch for it via MutationObserver and click it.
     const waitForPostAdPlay = (maxWaitMs = 30000) => {
         log('Watching for post-ad play button...');
         return new Promise((resolve) => {
@@ -683,7 +615,8 @@
             const settle = (clicked) => {
                 if (settled) return;
                 settled = true;
-                cleanup();
+                observer.disconnect();
+                clearTimeout(timeoutId);
                 resolve(clicked);
             };
 
@@ -713,22 +646,22 @@
                 log('No post-ad play button seen within timeout – continuing.');
                 settle(false);
             }, maxWaitMs);
-            const cleanup = () => {
-                observer.disconnect();
-                clearTimeout(timeoutId);
-            };
 
             observer.observe(document.body, {
-                childList:  true,
-                subtree:    true,
-                attributes: true,
+                childList:       true,
+                subtree:         true,
+                attributes:      true,
                 attributeFilter: ['class', 'style', 'aria-label'],
             });
         });
     };
 
+    // -------------------------------------------------------------------------
+    // Subtitle helpers
+    // -------------------------------------------------------------------------
     const enableSubtitles = async () => {
         log('Looking for subtitle controls...');
+
         const settingsSelectors = [
             '.ui-player-gui-button--settings',
             '.icon-settings',
@@ -740,7 +673,9 @@
             '.settings-button',
             'button[class*="settings"]',
         ];
+
         let opened = false;
+
         for (const selector of settingsSelectors) {
             const btn = document.querySelector(selector);
             if (btn && btn.offsetParent !== null) {
@@ -751,14 +686,15 @@
                 break;
             }
         }
+
         if (!opened) {
             for (const btn of document.querySelectorAll('button')) {
                 const aria = btn.getAttribute('aria-label')?.toLowerCase();
                 const cls  = btn.className.toLowerCase();
                 if (
                     aria?.includes('ustawienia') ||
-                    cls.includes('settings') ||
-                    cls.includes('gear') ||
+                    cls.includes('settings')     ||
+                    cls.includes('gear')         ||
                     btn.querySelector('.icon-settings, .icon-gear')
                 ) {
                     log('Found settings button by aria-label/class/icon');
@@ -769,31 +705,35 @@
                 }
             }
         }
+
         if (!opened) {
             log('Could not find or open settings menu.');
             return false;
         }
+
         await new Promise((r) => setTimeout(r, 500));
         return selectPolishSubtitles();
     };
 
     const selectPolishSubtitles = async () => {
         log('Looking for Polish subtitle options...');
+
         for (const col of document.querySelectorAll('.ui-player-gui-settings__column')) {
             const header = col.querySelector('.ui-player-gui-settings__item--header');
-            if (header && header.textContent.includes('Napisy')) {
-                log('Found Napisy column.');
-                for (const item of col.querySelectorAll('.ui-player-gui-settings__item')) {
-                    if (item.textContent.trim().includes('Polski dla niesłyszących')) {
-                        log('Selecting "Polski dla niesłyszących"');
-                        item.click();
-                        return true;
-                    }
+            if (!header?.textContent.includes('Napisy')) continue;
+
+            log('Found Napisy column.');
+            for (const item of col.querySelectorAll('.ui-player-gui-settings__item')) {
+                if (item.textContent.trim().includes('Polski dla niesłyszących')) {
+                    log('Selecting "Polski dla niesłyszących"');
+                    item.click();
+                    return true;
                 }
-                log('Napisy column found but Polish option not present.');
-                return false;
             }
+            log('Napisy column found but Polish option not present.');
+            return false;
         }
+
         for (const opt of document.querySelectorAll('.ui-player-gui-settings__item, button, li, option')) {
             const text = opt.textContent.trim();
             if (text.length <= 100 && text.includes('Polski dla niesłyszących')) {
@@ -802,18 +742,17 @@
                 return true;
             }
         }
+
         log('Polish subtitle option not found.');
         return false;
     };
 
     // -------------------------------------------------------------------------
-    // Step 3 – Assemble and download JSON
+    // Download JSON
     // -------------------------------------------------------------------------
     const buildFilename = () => {
-        const safe  = (s) => (s || 'unknown').replace(/[^a-zA-Z0-9_\-. ]/g, '_').trim();
-        const code  = data.episode_code || 'NoCode';
-        const title = safe(data.title);
-        return `${title}_${code}.json`;
+        const safe = (s) => (s || 'unknown').replace(/[^a-zA-Z0-9_\-. ]/g, '_').trim();
+        return `${safe(data.title)}_${data.episode_code || 'NoCode'}.json`;
     };
 
     const downloadJSON = () => {
@@ -825,22 +764,21 @@
             manifest_url:  data.manifest_url  ?? null,
             subtitles_url: data.subtitles_url ?? null,
         };
+
         log('Downloading JSON:\n' + JSON.stringify(payload, null, 2));
-        const json     = JSON.stringify(payload, null, 2);
-        const blob     = new Blob([json], { type: 'application/json' });
-        const url      = URL.createObjectURL(blob);
-        const a        = document.createElement('a');
-        a.href         = url;
-        a.download     = buildFilename();
+
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = Object.assign(document.createElement('a'), { href: url, download: buildFilename() });
+
         document.body.appendChild(a);
         a.click();
+
         setTimeout(() => {
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-
-            // Check if current URL is in our link list and redirect to next episode
-            if (isCurrentUrlInLinkList()) {
-                log('Current episode is in link list, preparing to redirect to next episode...');
+            if (EPISODE_LINKS.includes(location.href)) {
+                log('Current episode is in link list, preparing to redirect...');
                 redirectToNextEpisode();
             }
         }, 200);
@@ -855,29 +793,26 @@
 
         try {
             await waitForPlayButton();
-
-            // Wait for the player to attach a blob-URL video element.
             await detectBlobVideo();
-
-            // Click the post-ad resume button if it appears.
             await waitForPostAdPlay();
 
-            // Scan timeline now that segments are actively being fetched.
             scanExistingEntries();
 
-            log('Waiting 10 s for player to settle...');
-            await new Promise((r) => setTimeout(r, 10000));
+            // If both URLs were already captured (e.g. from PerformanceObserver
+            // or XHR/fetch patches), onBothCaptured() will have already fired.
+            // The steps below only run when the subtitles URL is still missing.
+            if (downloadTriggered) return;
 
+            log('Waiting 5 s for player to settle...');
+            await new Promise((r) => setTimeout(r, 5000));
             scanExistingEntries();
+
+            if (downloadTriggered) return;
 
             await enableSubtitles();
-
-            // Re-click play after closing the settings menu so the player
-            // resumes and fetches the selected subtitle track.
             await new Promise((r) => setTimeout(r, 500));
-            await clickPlayButton();
+            clickPlayButton();
 
-            // Poll for the subtitle XML request after enabling subtitles.
             if (!data.subtitles_url) {
                 log('Subtitles URL not yet seen, waiting up to 10 s...');
                 const POLL_INTERVAL_MS = 500;
@@ -887,7 +822,7 @@
                     const poll = setInterval(() => {
                         scanExistingEntries();
                         waited += POLL_INTERVAL_MS;
-                        if (data.subtitles_url || waited >= POLL_MAX_MS) {
+                        if (downloadTriggered || waited >= POLL_MAX_MS) {
                             clearInterval(poll);
                             resolve();
                         }
@@ -895,7 +830,13 @@
                 });
             }
 
-            downloadJSON();
+            // Final fallback: download whatever we have.
+            if (!downloadTriggered) {
+                log('Subtitles URL not captured – downloading with available data.');
+                downloadTriggered = true;
+                downloadJSON();
+            }
+
             log('Auto-play sequence completed.');
         } catch (err) {
             log(`Error during auto-play: ${err.message}`);
@@ -908,8 +849,6 @@
     const init = () => {
         log('TVP Video Info Extractor loaded.');
 
-        // All patches must run before any page script creates Workers or makes
-        // network requests, which is guaranteed by @run-at document-start.
         patchMainThreadRequests();
         patchWorkerConstructor();
         installPerformanceObserver();
