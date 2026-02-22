@@ -340,6 +340,8 @@ def download_episode(manifest_url, subtitle_url, episode_code, temp_dir, show_ti
         ], episode_code)
         _progress_display.update(episode_code, "Download complete.")
 
+        time.sleep(1)  # brief pause to ensure file is fully flushed to disk
+
         has_subtitles = False
         try:
             urllib.request.urlretrieve(subtitle_url, ttml_path)
