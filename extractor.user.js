@@ -4,8 +4,6 @@
 // @version      3.0
 // @description  Extracts metadata, manifest URL, and subtitles URL from TVP VOD pages and downloads them as JSON
 // @author       You
-// @match        https://*.tvp.pl/*
-// @match        https://tvp.pl/*
 // @match        https://vod.tvp.pl/*
 // @run-at       document-start
 // @grant        unsafeWindow
