@@ -14,16 +14,20 @@ import glob
 def check_dependencies():
     missing = []
     for tool, install in [
-        ('tt',     "pip install --pre ttconv"),
+        ('tt', "pip install --pre ttconv"),
         ('yt-dlp', "pip install yt-dlp"),
         ('ffmpeg', "your system package manager"),
-        ('ffprobe', "your system package manager (ships with ffmpeg)"),
+        ('ffprobe', "your system package manager"),
     ]:
         if not shutil.which(tool):
-            missing.append(f"  '{tool}' — install with: {install}")
+            missing.append(
+                f"  '{tool}' — install with: {install}"
+            )
 
     if missing:
-        raise RuntimeError("Missing required dependencies:\n" + "\n".join(missing))
+        raise RuntimeError(
+            "Missing required dependencies:\n" + "\n".join(missing)
+        )
 
 
 def get_default_temp_dir():
@@ -43,7 +47,8 @@ def convert_ttml_to_vtt(input_filepath, output_filepath):
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         raise RuntimeError(
-            f"ttconv conversion failed:\n{proc.stderr.decode('utf-8', errors='ignore')}"
+            f"ttconv conversion failed:\n"
+            f"{proc.stderr.decode('utf-8', errors='ignore')}"
         )
     print(f"Converted subtitles saved to: {output_filepath}")
 
@@ -53,7 +58,9 @@ def validate_json_data(json_data):
         if field not in json_data:
             raise KeyError(f"Missing required field: '{field}'")
         if not json_data[field].startswith('http'):
-            raise ValueError(f"Invalid {field}: must start with http/https")
+            raise ValueError(
+                f"Invalid {field}: must start with http/https"
+            )
 
 
 def load_json_data(json_file_path):
@@ -100,10 +107,14 @@ def verify_mp4(filepath, episode_code, has_subtitles_expected):
         '-of', 'json',
         filepath,
     ]
-    probe = subprocess.run(probe_cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    probe = subprocess.run(
+        probe_cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+    )
     if probe.returncode != 0:
-        _tagged_print(episode_code,
-                      f"Verification FAILED: ffprobe error — {probe.stderr.strip()}")
+        _tagged_print(
+            episode_code,
+            f"Verification FAILED: ffprobe error — {probe.stderr.strip()}"
+        )
         return False
 
     try:
@@ -120,16 +131,20 @@ def verify_mp4(filepath, episode_code, has_subtitles_expected):
     if has_subtitles_expected:
         streams = info.get('streams', [])
         if not any(s.get('codec_type') == 'subtitle' for s in streams):
-            _tagged_print(episode_code,
-                          "Verification WARNING: subtitle track missing from output.")
+            _tagged_print(
+                episode_code,
+                "Verification WARNING: subtitle track missing from output."
+            )
 
     # --- ffmpeg null-sink: detect dropped / corrupt frames (sample only) ---
     # Decode the first and last 30 s rather than the full file to avoid
     # hanging for minutes on long episodes while still catching corruption.
     SAMPLE_S = 30
     tail_start = max(0.0, duration - SAMPLE_S)
-    _tagged_print(episode_code,
-                  f"Verification: decode-checking first/last {SAMPLE_S}s…")
+    _tagged_print(
+        episode_code,
+        f"Verification: decode-checking first/last {SAMPLE_S}s…"
+    )
     errors = []
     for seek, label in [(0, 'head'), (tail_start, 'tail')]:
         decode_cmd = [
@@ -138,25 +153,33 @@ def verify_mp4(filepath, episode_code, has_subtitles_expected):
             '-t', str(SAMPLE_S),
             '-f', 'null', '/dev/null',
         ]
-        decode = subprocess.run(decode_cmd, capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, timeout=120)
+        decode = subprocess.run(
+            decode_cmd, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=120
+        )
         if decode.returncode != 0:
-            _tagged_print(episode_code,
-                          f"Verification FAILED: ffmpeg decode error ({label}) — "
-                          f"{decode.stderr.strip()[:400]}")
+            _tagged_print(
+                episode_code,
+                f"Verification FAILED: ffmpeg decode error ({label}) — "
+                f"{decode.stderr.strip()[:400]}"
+            )
             return False
         if decode.stderr.strip():
             errors.append(f"{label}: {decode.stderr.strip()[:200]}")
 
     if errors:
-        _tagged_print(episode_code,
-                      "Verification WARNING: " + " | ".join(errors))
+        _tagged_print(
+            episode_code,
+            "Verification WARNING: " + " | ".join(errors)
+        )
 
-    _tagged_print(episode_code, f"Verification passed — duration {duration:.1f}s.")
+    _tagged_print(
+        episode_code, f"Verification passed — duration {duration:.1f}s."
+    )
     return True
 
 
-MAX_CONCURRENT_DOWNLOADS = 6
+MAX_CONCURRENT_DOWNLOADS = 3
 _download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 _stop_event = threading.Event()
 
@@ -184,17 +207,17 @@ class ProgressDisplay:
     a file).
     """
 
-    _HIDE      = "\x1b[?25l"
-    _SHOW      = "\x1b[?25h"
+    _HIDE = "\x1b[?25l"
+    _SHOW = "\x1b[?25h"
     _CLEAR_LINE = "\r\x1b[2K"
-    _UP        = "\x1b[{}A"
+    _UP = "\x1b[{}A"
 
     def __init__(self):
-        self._lock  = threading.Lock()
-        self._slots = {}   # episode_code -> row index (0-based, top = 0)
-        self._lines = []   # current text for each row
+        self._lock = threading.Lock()
+        self._slots = {}  # episode_code -> row index (0-based, top = 0)
+        self._lines = []  # current text for each row
         self._last_update = {}  # episode_code -> last redraw timestamp
-        self._tty   = sys.stdout.isatty()
+        self._tty = sys.stdout.isatty()
         if self._tty:
             sys.stdout.write(self._HIDE)
             sys.stdout.flush()
@@ -312,19 +335,25 @@ def _run_yt_dlp(args, episode_code):
     proc.wait()
 
 
-def download_episode(manifest_url, subtitle_url, episode_code, temp_dir, show_title, language_code, metadata, output_directory, keep_temp=False):
+def download_episode(
+    manifest_url, subtitle_url, episode_code, temp_dir, show_title,
+    language_code, metadata, output_directory, keep_temp=False
+):
     _progress_display.register(episode_code, "Waiting for slot…")
     _download_semaphore.acquire()
     try:
         output_stem = f"{show_title}_{episode_code}" if episode_code else show_title
-        mp4_path    = os.path.join(temp_dir, f"{output_stem}.mp4")
-        ttml_path   = os.path.join(temp_dir, f"{output_stem}.xml")
-        vtt_path    = os.path.join(temp_dir, f"{output_stem}.vtt")
-        muxed_path  = os.path.join(temp_dir, f"{output_stem}_muxed.mp4")
-        final_path  = os.path.join(output_directory, f"{output_stem}.mp4")
+        mp4_path = os.path.join(temp_dir, f"{output_stem}.mp4")
+        ttml_path = os.path.join(temp_dir, f"{output_stem}.xml")
+        vtt_path = os.path.join(temp_dir, f"{output_stem}.vtt")
+        muxed_path = os.path.join(temp_dir, f"{output_stem}_muxed.mp4")
+        final_path = os.path.join(output_directory, f"{output_stem}.mp4")
 
         if os.path.exists(final_path):
-            _tagged_print(episode_code, f"Skipping — output file already exists: {final_path}")
+            _tagged_print(
+                episode_code,
+                f"Skipping — output file already exists: {final_path}"
+            )
             _progress_display.update(episode_code, "Skipped (already exists).")
             return
 
@@ -332,7 +361,6 @@ def download_episode(manifest_url, subtitle_url, episode_code, temp_dir, show_ti
 
         _run_yt_dlp([
             'yt-dlp', manifest_url,
-            '--force-generic-extractor',
             '--merge-output-format', 'mp4',
             '-o', mp4_path,
             '--fragment-retries', 'infinite',
@@ -343,13 +371,20 @@ def download_episode(manifest_url, subtitle_url, episode_code, temp_dir, show_ti
         time.sleep(1)  # brief pause to ensure file is fully flushed to disk
 
         has_subtitles = False
-        try:
-            urllib.request.urlretrieve(subtitle_url, ttml_path)
-            _tagged_print(episode_code, f"Subtitles downloaded → {ttml_path}")
-            convert_ttml_to_vtt(ttml_path, vtt_path)
-            has_subtitles = os.path.exists(vtt_path)
-        except Exception as e:
-            _tagged_print(episode_code, f"Subtitle error: {e}")
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                urllib.request.urlretrieve(subtitle_url, ttml_path)
+                _tagged_print(episode_code, f"Subtitles downloaded → {ttml_path}")
+                convert_ttml_to_vtt(ttml_path, vtt_path)
+                has_subtitles = os.path.exists(vtt_path)
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    _tagged_print(episode_code, f"Subtitle download attempt {attempt + 1}/{max_retries} failed: {e}")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    _tagged_print(episode_code, f"Subtitle download failed after {max_retries} attempts: {e}")
 
         metadata_flags = build_metadata_flags(metadata)
 
@@ -374,16 +409,22 @@ def download_episode(manifest_url, subtitle_url, episode_code, temp_dir, show_ti
         _tagged_print(episode_code, "Muxing…")
         proc = subprocess.run(ffmpeg_cmd, capture_output=True)
         if proc.returncode != 0:
-            _tagged_print(episode_code,
-                          f"FFmpeg error: {proc.stderr.decode('utf-8', errors='ignore')}")
+            _tagged_print(
+                episode_code,
+                f"FFmpeg error: {proc.stderr.decode('utf-8', errors='ignore')}"
+            )
         else:
-            _tagged_print(episode_code, f"Muxing complete ({subtitle_status}). Verifying…")
+            _tagged_print(
+                episode_code, f"Muxing complete ({subtitle_status}). Verifying…"
+            )
             if verify_mp4(muxed_path, episode_code, has_subtitles_expected=has_subtitles):
                 shutil.move(muxed_path, final_path)
                 _tagged_print(episode_code, f"Saved: {final_path}")
             else:
-                _tagged_print(episode_code,
-                              f"Verification failed — file kept for inspection: {muxed_path}")
+                _tagged_print(
+                    episode_code,
+                    f"Verification failed — file kept for inspection: {muxed_path}"
+                )
                 muxed_path = None  # don't delete it below
 
         if not keep_temp:
@@ -405,16 +446,16 @@ def process_episode(json_data, temp_dir, language_code, output_directory, keep_t
         print(f"Error: Invalid episode data — {e}")
         return None
 
-    episode_code  = json_data.get('episode_code', '')
-    show_title    = json_data.get('title', 'video')
+    episode_code = json_data.get('episode_code', '')
+    show_title = json_data.get('title', 'video')
     episode_title = json_data.get('episode_title', 'Unknown')
 
     metadata = {
-        'title':       episode_title,
-        'show':        json_data.get('title', ''),
-        'episode_id':  episode_code,
+        'title': episode_title,
+        'show': json_data.get('title', ''),
+        'episode_id': episode_code,
         'description': json_data.get('description', ''),
-        'comment':     json_data.get('description', ''),
+        'comment': json_data.get('description', ''),
     }
 
     _progress_display.message(f"--- {episode_title} ({episode_code}) ---")
@@ -483,17 +524,26 @@ Examples:
 
     args = parser.parse_args()
 
+    if args.keep_temp:
+        print("Keep temporary files enabled (--keep-temp)")
+
     try:
         check_dependencies()
     except RuntimeError as e:
         print(f"Dependency error: {e}")
         return
 
-    temp_dir = os.path.expanduser(args.temp_dir) if args.temp_dir else get_default_temp_dir()
+    temp_dir = (
+        os.path.expanduser(args.temp_dir)
+        if args.temp_dir else get_default_temp_dir()
+    )
     os.makedirs(temp_dir, exist_ok=True)
     os.environ['TMPDIR'] = temp_dir
 
-    output_directory = os.path.expanduser(args.output_directory) if args.output_directory else os.getcwd()
+    output_directory = (
+        os.path.expanduser(args.output_directory)
+        if args.output_directory else os.getcwd()
+    )
     os.makedirs(output_directory, exist_ok=True)
 
     json_path = os.path.expanduser(args.input_path)
@@ -512,7 +562,7 @@ Examples:
     print(f"Found {len(json_files)} JSON file(s) to process.")
 
     threads = []
-    queued  = 0
+    queued = 0
 
     for json_file in json_files:
         _progress_display.message(f"Loading: {json_file}")
@@ -524,7 +574,10 @@ Examples:
                 queued += 1
                 time.sleep(2)
 
-    _progress_display.message(f"{queued}/{len(json_files)} episode(s) queued. Waiting for downloads to finish…")
+    _progress_display.message(
+        f"{queued}/{len(json_files)} episode(s) queued. "
+        "Waiting for downloads to finish…"
+    )
 
     try:
         for thread in threads:
@@ -549,7 +602,6 @@ Examples:
             print(f"Cleaned up temporary directory: {temp_dir}")
         except Exception as e:
             print(f"Warning: Could not remove temp directory: {e}")
-
 
 if __name__ == "__main__":
     main()
