@@ -7,10 +7,10 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import urllib.request
+import re
 
 
 def check_dependencies():
@@ -88,15 +88,6 @@ def load_json_data(json_file_path):
             error_msg = f"Error: {e}"
         print(error_msg, file=sys.stderr)
         sys.exit(1)
-
-
-def build_metadata_flags(metadata):
-    """Return a flat list of ffmpeg -metadata key=value arguments."""
-    flags = []
-    for key, value in metadata.items():
-        if value:
-            flags += ['-metadata', f'{key}={value}']
-    return flags
 
 
 def verify_mp4(filepath, episode_code, has_subtitles_expected):
@@ -354,9 +345,12 @@ def _run_yt_dlp(args, episode_code):
 
 
 def download_episode(
-    manifest_url, subtitle_url, episode_code, temp_dir, show_title,
-    language_code, metadata, output_directory, keep_temp=False
+    manifest_url, subtitle_url, temp_dir, metadata,
+    output_directory, keep_temp=False
 ):
+    episode_code = metadata.get("episode_id", "")
+    show_title = metadata.get("show", "")
+    language_code = metadata.get("language", "pl")
     _progress_display.register(episode_code, "Waiting for slot…")
     _download_semaphore.acquire()
     try:
@@ -404,7 +398,12 @@ def download_episode(
                 else:
                     _tagged_print(episode_code, f"Subtitle download failed after {max_retries} attempts: {e}")
 
-        metadata_flags = build_metadata_flags(metadata)
+        metadata_flags = []
+        for key, value in metadata.items():
+            if value is not None:
+                flag = "-metadata"
+                flag += f" {key}={value}"
+                metadata_flags.append(flag)
 
         if has_subtitles:
             ffmpeg_cmd = [
@@ -457,6 +456,73 @@ def download_episode(
         _download_semaphore.release()
 
 
+def parse_json_ld_data(json_data, language_code="pl"):
+    """
+    Extract episode metadata from JSON-LD data.
+
+    Returns a single dict with ffmpeg-ready metadata keys plus
+    'manifest_url' and 'subtitles_url'.
+    """
+
+    ld = json_data.get("JSON-LD", {}) or {}
+
+    webpage = (
+        ld.get("mainEntityOfPage", {}) or {}
+    ).get("@id")
+
+    episode_id = None
+    season_number = None
+    episode_sort = None
+
+    if webpage:
+        try:
+            episode_id = webpage.split("/")[-1].split(",")[1]
+        except (IndexError, AttributeError):
+            pass
+
+    if episode_id:
+        match = re.match(r"S(\d+)E(\d+)", episode_id)
+        if match:
+            season_number = int(match.group(1))
+            episode_sort = int(match.group(2))
+
+    name = ld.get("name", "")
+
+    show = None
+    title = None
+
+    if " – " in name:
+        left, title = name.split(" – ", 1)
+    else:
+        left = name
+
+    if " odc." in left:
+        show = left.split(" odc.")[0]
+    else:
+        show = left
+
+    network = (
+        ld.get("publisher", {}) or {}
+    ).get("legalName")
+
+    return {
+        "manifest_url": json_data.get("manifest_url"),
+        "subtitles_url": json_data.get("subtitles_url"),
+        "metadata": {
+            "title": title,
+            "show": show,
+            "episode_id": episode_id,
+            "description": ld.get("description"),
+            "purl": webpage,
+            "date": ld.get("datePublished"),
+            "network": network,
+            "language": language_code,
+            "season_number": season_number,
+            "episode_sort": episode_sort,
+        },
+    }
+
+
 def process_episode(json_data, temp_dir, language_code, output_directory, keep_temp=False):
     """Process a single episode by validating data and starting download thread."""
     try:
@@ -465,30 +531,21 @@ def process_episode(json_data, temp_dir, language_code, output_directory, keep_t
         print(f"Error: Invalid episode data — {e}", file=sys.stderr)
         sys.exit(1)
 
-    episode_code = json_data.get('episode_code', '')
-    show_title = json_data.get('title', 'video')
-    episode_title = json_data.get('episode_title', 'Unknown')
+    parsed = parse_json_ld_data(json_data, language_code)
 
-    metadata = {
-        'title': episode_title,
-        'show': json_data.get('title', ''),
-        'episode_id': episode_code,
-        'description': json_data.get('description', ''),
-        'comment': json_data.get('description', ''),
-    }
+    metadata = parsed.get("metadata", {})
+    episode_code = metadata.get("episode_id") or ""
+    episode_title = metadata.get("title") or episode_code
 
     _progress_display.message(f"--- {episode_title} ({episode_code}) ---")
 
     thread = threading.Thread(
         target=download_episode,
         args=(
-            json_data['manifest_url'],
-            json_data['subtitles_url'],
-            episode_code,
+            parsed["manifest_url"],
+            parsed["subtitles_url"],
             temp_dir,
-            show_title,
-            language_code,
-            metadata,
+            parsed["metadata"],
             output_directory,
             keep_temp,
         ),
@@ -635,6 +692,7 @@ Examples:
             print(f"Cleaned up temporary directory: {temp_dir}")
         except Exception as e:
             print(f"Warning: Could not remove temp directory: {e}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()
