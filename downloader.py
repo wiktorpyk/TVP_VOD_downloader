@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-import os
-import sys
-import json
-import time
-import threading
-import subprocess
-import shutil
-import urllib.request
+
 import argparse
 import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
 
 
 def check_dependencies():
@@ -53,6 +55,17 @@ def convert_ttml_to_vtt(input_filepath, output_filepath):
     print(f"Converted subtitles saved to: {output_filepath}")
 
 
+def check_file_exists(filepath):
+    """Check if a file exists and is readable."""
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"File not found: {filepath}")
+    if not os.path.isfile(filepath):
+        raise ValueError(f"Path is not a file: {filepath}")
+    if not os.access(filepath, os.R_OK):
+        raise PermissionError(f"File not readable: {filepath}")
+    return True
+
+
 def validate_json_data(json_data):
     for field in ('manifest_url', 'subtitles_url'):
         if field not in json_data:
@@ -65,13 +78,16 @@ def validate_json_data(json_data):
 
 def load_json_data(json_file_path):
     try:
+        check_file_exists(json_file_path)
         with open(json_file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except FileNotFoundError:
-        print(f"Error: JSON file not found: {json_file_path}")
-    except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON in {json_file_path}: {e}")
-    return None
+    except (FileNotFoundError, ValueError, PermissionError, json.JSONDecodeError) as e:
+        if isinstance(e, json.JSONDecodeError):
+            error_msg = f"Error: Invalid JSON in {json_file_path}: {e}"
+        else:
+            error_msg = f"Error: {e}"
+        print(error_msg, file=sys.stderr)
+        sys.exit(1)
 
 
 def build_metadata_flags(metadata):
@@ -93,8 +109,9 @@ def verify_mp4(filepath, episode_code, has_subtitles_expected):
       3. Subtitle track present when expected (ffprobe).
       4. No decode errors or dropped frames (ffmpeg null-sink pass).
 
-    Returns True if all hard checks pass, False otherwise.
-    Subtitle absence is reported as a warning but does not fail the check.
+    Returns:
+        bool: True if all hard checks pass, False otherwise.
+        Subtitle absence is reported as a warning but does not fail the check.
     """
     if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
         _tagged_print(episode_code, "Verification FAILED: file missing or empty.")
@@ -213,6 +230,7 @@ class ProgressDisplay:
     _UP = "\x1b[{}A"
 
     def __init__(self):
+        """Initialize the progress display with thread-safe components."""
         self._lock = threading.Lock()
         self._slots = {}  # episode_code -> row index (0-based, top = 0)
         self._lines = []  # current text for each row
@@ -440,11 +458,12 @@ def download_episode(
 
 
 def process_episode(json_data, temp_dir, language_code, output_directory, keep_temp=False):
+    """Process a single episode by validating data and starting download thread."""
     try:
         validate_json_data(json_data)
     except (KeyError, ValueError) as e:
-        print(f"Error: Invalid episode data — {e}")
-        return None
+        print(f"Error: Invalid episode data — {e}", file=sys.stderr)
+        sys.exit(1)
 
     episode_code = json_data.get('episode_code', '')
     show_title = json_data.get('title', 'video')
@@ -480,6 +499,7 @@ def process_episode(json_data, temp_dir, language_code, output_directory, keep_t
 
 
 def main():
+    """Main entry point for the TVP VOD downloader."""
     parser = argparse.ArgumentParser(
         description='Download videos and subtitles from TVP VOD using JSON episode files.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -522,7 +542,11 @@ Examples:
         help='Do not delete temporary files after download.',
     )
 
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        # argparse already printed the error and exits with code 2
+        sys.exit(2)
 
     if args.keep_temp:
         print("Keep temporary files enabled (--keep-temp)")
@@ -530,8 +554,8 @@ Examples:
     try:
         check_dependencies()
     except RuntimeError as e:
-        print(f"Dependency error: {e}")
-        return
+        print(f"Dependency error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     temp_dir = (
         os.path.expanduser(args.temp_dir)
@@ -548,49 +572,58 @@ Examples:
 
     json_path = os.path.expanduser(args.input_path)
 
-    if os.path.isfile(json_path):
-        json_files = [json_path]
-    elif os.path.isdir(json_path):
-        json_files = sorted(glob.glob(os.path.join(json_path, '*.json')))
-        if not json_files:
-            print(f"No JSON files found in: {json_path}")
-            return
-    else:
-        print(f"Error: '{json_path}' is not a valid file or directory.")
-        return
+    try:
+        if os.path.isfile(json_path):
+            json_files = [json_path]
+        elif os.path.isdir(json_path):
+            json_files = sorted(glob.glob(os.path.join(json_path, '*.json')))
+            if not json_files:
+                print(f"No JSON files found in: {json_path}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print(f"Error: '{json_path}' is not a valid file or directory.", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error accessing path '{json_path}': {e}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Found {len(json_files)} JSON file(s) to process.")
 
     threads = []
     queued = 0
 
-    for json_file in json_files:
-        _progress_display.message(f"Loading: {json_file}")
-        json_data = load_json_data(json_file)
-        if json_data:
-            thread = process_episode(json_data, temp_dir, args.language, output_directory, args.keep_temp)
-            if thread:
-                threads.append(thread)
-                queued += 1
-                time.sleep(2)
-
-    _progress_display.message(
-        f"{queued}/{len(json_files)} episode(s) queued. "
-        "Waiting for downloads to finish…"
-    )
-
     try:
-        for thread in threads:
-            while thread.is_alive():
-                thread.join(timeout=1)
-    except KeyboardInterrupt:
-        print("\nInterrupted — signalling threads to stop…")
-        _stop_event.set()
-        for thread in threads:
-            thread.join()
-        print("All threads stopped.")
-    else:
-        print("All downloads completed.")
+        for json_file in json_files:
+            _progress_display.message(f"Loading: {json_file}")
+            json_data = load_json_data(json_file)
+            if json_data:
+                thread = process_episode(json_data, temp_dir, args.language, output_directory, args.keep_temp)
+                if thread:
+                    threads.append(thread)
+                    queued += 1
+                    time.sleep(2)
+
+        _progress_display.message(
+            f"{queued}/{len(json_files)} episode(s) queued. "
+            "Waiting for downloads to finish…"
+        )
+
+        try:
+            for thread in threads:
+                while thread.is_alive():
+                    thread.join(timeout=1)
+        except KeyboardInterrupt:
+            print("\nInterrupted — signalling threads to stop…", file=sys.stderr)
+            _stop_event.set()
+            for thread in threads:
+                thread.join()
+            print("All threads stopped.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print("All downloads completed.")
+    except Exception as e:
+        print(f"Unexpected error: {e}", file=sys.stderr)
+        sys.exit(1)
     finally:
         _progress_display.close()
 
@@ -601,7 +634,7 @@ Examples:
             shutil.rmtree(temp_dir)
             print(f"Cleaned up temporary directory: {temp_dir}")
         except Exception as e:
-            print(f"Warning: Could not remove temp directory: {e}")
+            print(f"Warning: Could not remove temp directory: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
