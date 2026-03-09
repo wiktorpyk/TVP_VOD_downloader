@@ -49,7 +49,7 @@ while IFS= read -r link; do
     
     # Call Python parser
     echo "Parsing file with Python script..."
-    if ! python3 downloader.py "$downloaded_file" videos/; then
+    if ! python3 downloader.py "$downloaded_file" videos/ --keep-temp --check-dropped-frames; then
         echo "Error: Python script failed while processing $downloaded_file"
         exit 1
     fi

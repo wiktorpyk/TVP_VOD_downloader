@@ -90,7 +90,7 @@ def load_json_data(json_file_path):
         sys.exit(1)
 
 
-def verify_mp4(filepath, episode_code, has_subtitles_expected):
+def verify_mp4(filepath, episode_code, has_subtitles_expected, check_dropped_frames=False):
     """
     Verify the muxed MP4 before it is moved to the final destination.
 
@@ -144,41 +144,39 @@ def verify_mp4(filepath, episode_code, has_subtitles_expected):
                 "Verification WARNING: subtitle track missing from output."
             )
 
-    # --- ffmpeg null-sink: detect dropped / corrupt frames (sample only) ---
-    # Decode the first and last 30 s rather than the full file to avoid
-    # hanging for minutes on long episodes while still catching corruption.
-    SAMPLE_S = 30
-    tail_start = max(0.0, duration - SAMPLE_S)
-    _tagged_print(
-        episode_code,
-        f"Verification: decode-checking first/last {SAMPLE_S}s…"
-    )
-    errors = []
-    for seek, label in [(0, 'head'), (tail_start, 'tail')]:
+    # --- ffmpeg null-sink: detect dropped / corrupt frames ---
+    if check_dropped_frames:
+        # Check entire file for dropped frames
+        _tagged_print(
+            episode_code,
+            "Verification: decode-checking file for dropped frames…"
+        )
         decode_cmd = [
             'ffmpeg', '-v', 'error',
-            '-ss', str(seek), '-i', filepath,
-            '-t', str(SAMPLE_S),
+            '-i', filepath,
             '-f', 'null', '/dev/null',
         ]
         decode = subprocess.run(
             decode_cmd, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=120
+            stdin=subprocess.DEVNULL, timeout=300
         )
         if decode.returncode != 0:
             _tagged_print(
                 episode_code,
-                f"Verification FAILED: ffmpeg decode error ({label}) — "
+                f"Verification FAILED: ffmpeg decode error — "
                 f"{decode.stderr.strip()[:400]}"
             )
             return False
         if decode.stderr.strip():
-            errors.append(f"{label}: {decode.stderr.strip()[:200]}")
-
-    if errors:
+            _tagged_print(
+                episode_code,
+                f"Verification WARNING: dropped frames detected — {decode.stderr.strip()[:200]}"
+            )
+    else:
+        # Skip dropped frames check entirely
         _tagged_print(
             episode_code,
-            "Verification WARNING: " + " | ".join(errors)
+            "Verification: skipping dropped frames check."
         )
 
     _tagged_print(
@@ -346,7 +344,7 @@ def _run_yt_dlp(args, episode_code):
 
 def download_episode(
     manifest_url, subtitle_url, temp_dir, metadata,
-    output_directory, keep_temp=False
+    output_directory, keep_temp=False, check_dropped_frames=False
 ):
     episode_code = metadata.get("episode_id", "")
     show_title = metadata.get("show", "")
@@ -401,9 +399,7 @@ def download_episode(
         metadata_flags = []
         for key, value in metadata.items():
             if value is not None:
-                flag = "-metadata"
-                flag += f" {key}={value}"
-                metadata_flags.append(flag)
+                metadata_flags.extend(["-metadata", f"{key}={value}"])
 
         if has_subtitles:
             ffmpeg_cmd = [
@@ -426,15 +422,27 @@ def download_episode(
         _tagged_print(episode_code, "Muxing…")
         proc = subprocess.run(ffmpeg_cmd, capture_output=True)
         if proc.returncode != 0:
+            error_msg = proc.stderr.decode('utf-8', errors='ignore')
+            _tagged_print(
+                episode_code,
+                f"FFmpeg error: {error_msg}"
+            )
             _tagged_print(
                 episode_code,
                 f"FFmpeg error: {proc.stderr.decode('utf-8', errors='ignore')}"
             )
+            _tagged_print(episode_code, "Muxing failed - exiting.")
+            # Clean up temp files before exiting
+            if not keep_temp:
+                for path in (mp4_path, ttml_path, vtt_path):
+                    if path and os.path.exists(path):
+                        os.remove(path)
+            sys.exit(1)
         else:
             _tagged_print(
                 episode_code, f"Muxing complete ({subtitle_status}). Verifying…"
             )
-            if verify_mp4(muxed_path, episode_code, has_subtitles_expected=has_subtitles):
+            if verify_mp4(muxed_path, episode_code, has_subtitles_expected=has_subtitles, check_dropped_frames=check_dropped_frames):
                 shutil.move(muxed_path, final_path)
                 _tagged_print(episode_code, f"Saved: {final_path}")
             else:
@@ -512,7 +520,7 @@ def parse_json_ld_data(json_data, language_code="pl"):
             "title": title,
             "show": show,
             "episode_id": episode_id,
-            "description": ld.get("description"),
+            "comment": ld.get("description"),
             "purl": webpage,
             "date": ld.get("datePublished"),
             "network": network,
@@ -523,7 +531,7 @@ def parse_json_ld_data(json_data, language_code="pl"):
     }
 
 
-def process_episode(json_data, temp_dir, language_code, output_directory, keep_temp=False):
+def process_episode(json_data, temp_dir, language_code, output_directory, keep_temp=False, check_dropped_frames=False):
     """Process a single episode by validating data and starting download thread."""
     try:
         validate_json_data(json_data)
@@ -548,6 +556,7 @@ def process_episode(json_data, temp_dir, language_code, output_directory, keep_t
             parsed["metadata"],
             output_directory,
             keep_temp,
+            check_dropped_frames,
         ),
         daemon=False,
     )
@@ -597,6 +606,12 @@ Examples:
         action='store_true',
         default=False,
         help='Do not delete temporary files after download.',
+    )
+    parser.add_argument(
+        '--check-dropped-frames',
+        action='store_true',
+        default=False,
+        help='Check entire file for dropped frames (slower verification).',
     )
 
     try:
@@ -654,7 +669,7 @@ Examples:
             _progress_display.message(f"Loading: {json_file}")
             json_data = load_json_data(json_file)
             if json_data:
-                thread = process_episode(json_data, temp_dir, args.language, output_directory, args.keep_temp)
+                thread = process_episode(json_data, temp_dir, args.language, output_directory, args.keep_temp, args.check_dropped_frames)
                 if thread:
                     threads.append(thread)
                     queued += 1

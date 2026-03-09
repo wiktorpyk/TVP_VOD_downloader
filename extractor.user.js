@@ -411,6 +411,8 @@
             URL.revokeObjectURL(url);
             if (EPISODE_LINKS.includes(location.href)) {
                 redirectToNextEpisode();
+            } else {
+                setTimeout(closeTab, 2000);
             }
         }, 2000);
     };
