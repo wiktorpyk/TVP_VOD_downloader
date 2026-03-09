@@ -13,6 +13,40 @@ import urllib.request
 import re
 
 
+# Public variable to control temp file cleanup behavior
+keep_temp = False
+
+
+def remove_temp_files(paths):
+    """
+    Remove temporary files or directories.
+    Args:
+        paths: Tuple of file paths or a single path to a folder
+    """
+    if keep_temp:
+        print("Temporary files kept. To remove run:")
+        if isinstance(paths, (list, tuple)):
+            # Filter out None values and deduplicate
+            clean_paths = [p for p in paths if p]
+            unique_paths = list(dict.fromkeys(clean_paths))
+            print(f"rm {' '.join(unique_paths)}")
+        else:
+            print(f"rm -rf {paths}")
+        return
+
+    if isinstance(paths, (list, tuple)):
+        # Filter out None values and deduplicate
+        clean_paths = [p for p in paths if p]
+        unique_paths = list(dict.fromkeys(clean_paths))
+        for path in unique_paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+    else:
+        shutil.rmtree(paths, ignore_errors=True)
+
+
 def check_dependencies():
     missing = []
     for tool, install in [
@@ -433,10 +467,7 @@ def download_episode(
             )
             _tagged_print(episode_code, "Muxing failed - exiting.")
             # Clean up temp files before exiting
-            if not keep_temp:
-                for path in (mp4_path, ttml_path, vtt_path):
-                    if path and os.path.exists(path):
-                        os.remove(path)
+            remove_temp_files((mp4_path, ttml_path, vtt_path))
             sys.exit(1)
         else:
             _tagged_print(
@@ -452,12 +483,7 @@ def download_episode(
                 )
                 muxed_path = None  # don't delete it below
 
-        if not keep_temp:
-            for path in (mp4_path, ttml_path, vtt_path, muxed_path):
-                if path and os.path.exists(path):
-                    os.remove(path)
-        else:
-            _tagged_print(episode_code, "Temp files kept (--keep-temp).")
+        remove_temp_files((mp4_path, ttml_path, vtt_path, muxed_path))
 
         _tagged_print(episode_code, "Done.")
     finally:
@@ -623,6 +649,10 @@ Examples:
     if args.keep_temp:
         print("Keep temporary files enabled (--keep-temp)")
 
+    # Set global keep_temp variable
+    global keep_temp
+    keep_temp = args.keep_temp
+
     try:
         check_dependencies()
     except RuntimeError as e:
@@ -699,14 +729,7 @@ Examples:
     finally:
         _progress_display.close()
 
-    if args.keep_temp:
-        print(f"Temporary files kept in: {temp_dir}")
-    else:
-        try:
-            shutil.rmtree(temp_dir)
-            print(f"Cleaned up temporary directory: {temp_dir}")
-        except Exception as e:
-            print(f"Warning: Could not remove temp directory: {e}", file=sys.stderr)
+    remove_temp_files(temp_dir)
 
 
 if __name__ == "__main__":
